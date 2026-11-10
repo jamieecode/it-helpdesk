@@ -71,7 +71,7 @@ git mv db/migration/V1__init.sql db/migration/V2__seed.sql backend/src/main/reso
 ```yaml
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/helpdesk?connectionTimeZone=Asia/Seoul&characterEncoding=UTF-8
+    url: jdbc:mysql://localhost:3307/helpdesk?connectionTimeZone=Asia/Seoul&characterEncoding=UTF-8
     username: ${MYSQL_USER:helpdesk}
     password: ${MYSQL_PASSWORD}
   jpa:
