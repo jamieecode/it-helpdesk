@@ -1,0 +1,850 @@
+openapi: 3.1.0
+info:
+  title: 전산 업무요청 관리 시스템 API
+  version: 0.1.0
+  description: |
+    기획서·테이블 설계를 기준으로 한 API 목록입니다.
+
+    - 인증: 세션 쿠키(JSESSIONID). 로그인·로그아웃 결과는 JSON으로 응답합니다.
+    - CSRF: Spring Security 7 `csrf.spa()`. 토큰은 `XSRF-TOKEN` 쿠키로 받고, 변경 요청마다 `X-XSRF-TOKEN` 헤더로 보냅니다.
+      로그인·로그아웃 직후에는 `GET /api/auth/csrf`로 토큰을 다시 받습니다.
+    - 오류 응답은 모두 `ErrorResponse` 형식입니다.
+      400 입력 오류, 401 로그인 필요, 403 권한 없음, 404 없음,
+      409 `INVALID_STATUS_TRANSITION`(허용되지 않은 상태 변경) 또는 `VERSION_CONFLICT`(다른 사용자가 먼저 변경).
+    - 상태를 바꾸는 요청은 상세 조회에서 받은 `version`을 함께 보냅니다. 서버는 이 값을 직접 비교해 다르면 409를 돌려줍니다.
+    - 날짜·시각은 한국 시간(Asia/Seoul), 형식은 `yyyy-MM-dd` / `yyyy-MM-ddTHH:mm:ss`입니다.
+
+    `x-roles`: 호출할 수 있는 역할. `x-owner`: 역할에 더해 서비스 계층에서 확인하는 요청 단위 조건.
+    `x-event`: 처리 이력에 남는 이벤트. `x-from` / `x-to`: 허용되는 이전 상태와 이후 상태.
+    `x-screens`: 이 API를 쓰는 화면 동작(와이어프레임 기준).
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: 인증
+  - name: 요청
+  - name: 요청 처리
+  - name: 댓글
+  - name: 기준 정보
+  - name: 통계
+
+paths:
+  /api/auth/csrf:
+    get:
+      tags: [인증]
+      operationId: getCsrfToken
+      summary: CSRF 토큰 받기 (앱 시작·로그인·로그아웃 직후)
+      security: []
+      x-roles: [ANONYMOUS, REQUESTER, ASSIGNEE, ADMIN]
+      x-screens: [app.start]
+      responses:
+        '204': { description: XSRF-TOKEN 쿠키를 새로 내려줌 }
+
+  /api/auth/login:
+    post:
+      tags: [인증]
+      operationId: login
+      summary: 로그인
+      security: []
+      x-roles: [ANONYMOUS]
+      x-screens: [login.submit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: 로그인 성공. 세션 쿠키 발급
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: 아이디·비밀번호가 틀렸거나(INVALID_CREDENTIALS) 비활성 계정(ACCOUNT_DISABLED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/auth/logout:
+    post:
+      tags: [인증]
+      operationId: logout
+      summary: 로그아웃
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-screens: [header.logout]
+      responses:
+        '204': { description: 세션 만료 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/auth/me:
+    get:
+      tags: [인증]
+      operationId: getMe
+      summary: 현재 로그인 사용자 (새로고침 시 로그인 상태 확인, 역할별 메뉴)
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-screens: [app.start, header.user]
+      responses:
+        '200':
+          description: 현재 사용자
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/request-types:
+    get:
+      tags: [기준 정보]
+      operationId: listRequestTypes
+      summary: 요청 유형 목록 (등록 화면, 목록 필터)
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-screens: [list.filter.type, register.type]
+      responses:
+        '200':
+          description: 유형 목록 (sort_order 순)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RequestType' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/users/assignees:
+    get:
+      tags: [기준 정보]
+      operationId: listAssignees
+      summary: 배정 가능한 담당자 (enabled 담당자 + 처리 중 건수)
+      x-roles: [ADMIN]
+      x-screens: [detail.assign.dropdown]
+      responses:
+        '200':
+          description: 담당자 목록
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AssigneeOption' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/requests:
+    get:
+      tags: [요청]
+      operationId: listRequests
+      summary: 요청 목록 (탭 + 필터 + 페이지, id 역순)
+      description: |
+        탭은 상태 조건이 미리 걸린 목록입니다.
+        - MY: 요청자 전용, 내 요청 전체
+        - ASSIGNED_TO_ME: 담당자 전용, 배정됨·처리 중·보류
+        - PENDING_APPROVAL / RECEIVED: 관리자 전용. 이 두 탭에서 `status` 필터를 보내면 400(STATUS_FILTER_NOT_ALLOWED)
+        - ALL: 담당자·관리자
+        역할에 맞지 않는 탭은 403. 검색어는 제목 기준(LIKE). MyBatis 동적 SQL로 조회합니다.
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-owner: 요청자는 MY 탭만, 결과는 본인 요청만
+      x-screens: [list.tab.my, list.tab.assignedToMe, list.tab.pendingApproval, list.tab.received, list.tab.all, list.filter, list.search, list.page]
+      parameters:
+        - $ref: '#/components/parameters/Tab'
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/TypeIdFilter'
+        - $ref: '#/components/parameters/FromDate'
+        - $ref: '#/components/parameters/ToDate'
+        - $ref: '#/components/parameters/Keyword'
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: 목록 페이지
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [요청]
+      operationId: createRequest
+      summary: 요청 등록
+      description: 승인 필요 유형이면 PENDING_APPROVAL, 아니면 RECEIVED로 시작. 등록 시점의 부서와 승인 필요 여부를 함께 저장합니다.
+      x-roles: [REQUESTER]
+      x-event: CREATED
+      x-from: []
+      x-to: [PENDING_APPROVAL, RECEIVED]
+      x-screens: [list.newRequest, register.submit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRequest' }
+      responses:
+        '201':
+          description: 등록됨. Location 헤더에 상세 주소
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/requests/tab-counts:
+    get:
+      tags: [요청]
+      operationId: getTabCounts
+      summary: 관리자 대기 탭 건수 (필터와 무관)
+      x-roles: [ADMIN]
+      x-screens: [list.tab.counts]
+      responses:
+        '200':
+          description: 탭별 건수
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TabCounts' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/requests/export:
+    get:
+      tags: [요청]
+      operationId: exportRequests
+      summary: 요청 목록 엑셀 다운로드 (탭 + 필터 조건, '내용' 열 제외)
+      description: MyBatis Cursor로 한 행씩 읽어 SXSSF로 씁니다. 10만 행을 넘으면 400(TOO_MANY_ROWS).
+      x-roles: [ADMIN]
+      x-screens: [list.excel]
+      parameters:
+        - $ref: '#/components/parameters/Tab'
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/TypeIdFilter'
+        - $ref: '#/components/parameters/FromDate'
+        - $ref: '#/components/parameters/ToDate'
+        - $ref: '#/components/parameters/Keyword'
+      responses:
+        '200':
+          description: xlsx 파일 (Content-Disposition에 UTF-8 한글 파일명)
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/requests/{requestId}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      tags: [요청]
+      operationId: getRequest
+      summary: 요청 상세 (version, 처리 결과, 지금 가능한 동작 포함)
+      description: |
+        승인 필요 요청을 배정되지 않은 담당자가 열면 `contentVisible=false`이고 content·result는 null입니다.
+        `availableActions`는 서버가 상태·역할·본인 여부로 계산한 버튼 목록입니다.
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-owner: 요청자는 본인 요청만
+      x-screens: [list.openDetail, detail.view]
+      responses:
+        '200':
+          description: 상세
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [요청]
+      operationId: updateRequest
+      summary: 요청 수정 (제목·내용·희망 완료일, 유형은 수정 불가)
+      x-roles: [REQUESTER]
+      x-owner: 본인 요청만
+      x-event: UPDATED
+      x-from: [PENDING_APPROVAL, RECEIVED]
+      x-to: [SAME]
+      x-note: 승인 필요 요청은 승인 대기에서만
+      x-screens: [detail.edit]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/DetailOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/requests/{requestId}/approve:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: approveRequest
+      summary: 승인
+      x-roles: [ADMIN]
+      x-event: APPROVED
+      x-from: [PENDING_APPROVAL]
+      x-to: [RECEIVED]
+      x-screens: [detail.approve]
+      requestBody: { $ref: '#/components/requestBodies/VersionOnly' }
+      responses: &stateResponses
+        '200': { $ref: '#/components/responses/DetailOk' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/requests/{requestId}/reject:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: rejectRequest
+      summary: 반려 (사유 필수)
+      x-roles: [ADMIN]
+      x-event: REJECTED
+      x-from: [PENDING_APPROVAL, RECEIVED]
+      x-to: [REJECTED]
+      x-screens: [detail.reject]
+      requestBody: { $ref: '#/components/requestBodies/VersionWithText' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/assign:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: assignRequest
+      summary: 담당자 배정·변경
+      description: 최초 배정은 RECEIVED → ASSIGNED, 재배정은 ASSIGNED·IN_PROGRESS·ON_HOLD에서 상태 그대로. 대상은 enabled 담당자만(아니면 400 INVALID_ASSIGNEE).
+      x-roles: [ADMIN]
+      x-event: ASSIGNED
+      x-from: [RECEIVED, ASSIGNED, IN_PROGRESS, ON_HOLD]
+      x-to: [ASSIGNED, SAME]
+      x-screens: [detail.assign, detail.reassign]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignRequest' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/start:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: startRequest
+      summary: 처리 시작
+      x-roles: [ASSIGNEE]
+      x-owner: 배정된 담당자 본인만
+      x-event: STARTED
+      x-from: [ASSIGNED]
+      x-to: [IN_PROGRESS]
+      x-screens: [detail.start]
+      requestBody: { $ref: '#/components/requestBodies/VersionOnly' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/hold:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: holdRequest
+      summary: 보류 (사유 필수)
+      x-roles: [ASSIGNEE]
+      x-owner: 배정된 담당자 본인만
+      x-event: HELD
+      x-from: [IN_PROGRESS]
+      x-to: [ON_HOLD]
+      x-screens: [detail.hold]
+      requestBody: { $ref: '#/components/requestBodies/VersionWithText' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/resume:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: resumeRequest
+      summary: 처리 재개
+      x-roles: [ASSIGNEE]
+      x-owner: 배정된 담당자 본인만
+      x-event: RESUMED
+      x-from: [ON_HOLD]
+      x-to: [IN_PROGRESS]
+      x-screens: [detail.resume]
+      requestBody: { $ref: '#/components/requestBodies/VersionOnly' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/complete:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: completeRequest
+      summary: 처리 완료 (처리 결과 필수)
+      x-roles: [ASSIGNEE]
+      x-owner: 배정된 담당자 본인만
+      x-event: COMPLETED
+      x-from: [IN_PROGRESS]
+      x-to: [COMPLETED]
+      x-screens: [detail.complete]
+      requestBody: { $ref: '#/components/requestBodies/VersionWithText' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/reopen:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: reopenRequest
+      summary: 재요청 (최종 완료 후 7일 이내, 사유 필수)
+      x-roles: [REQUESTER]
+      x-owner: 본인 요청만
+      x-event: REOPENED
+      x-from: [COMPLETED]
+      x-to: [IN_PROGRESS]
+      x-screens: [detail.reopen]
+      requestBody: { $ref: '#/components/requestBodies/VersionWithText' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/cancel:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    post:
+      tags: [요청 처리]
+      operationId: cancelRequest
+      summary: 요청 취소 (처리 시작 전)
+      x-roles: [REQUESTER]
+      x-owner: 본인 요청만
+      x-event: CANCELED
+      x-from: [PENDING_APPROVAL, RECEIVED, ASSIGNED]
+      x-to: [CANCELED]
+      x-screens: [detail.cancel]
+      requestBody: { $ref: '#/components/requestBodies/VersionOnly' }
+      responses: *stateResponses
+
+  /api/requests/{requestId}/history:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    get:
+      tags: [요청]
+      operationId: listHistory
+      summary: 처리 이력 (최신순)
+      description: 승인 필요 요청을 배정되지 않은 담당자가 보면 content(사유·처리 결과)는 null.
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-owner: 요청자는 본인 요청만
+      x-screens: [detail.history]
+      responses:
+        '200':
+          description: 이력 목록
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/HistoryItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/requests/{requestId}/comments:
+    parameters: [ { $ref: '#/components/parameters/RequestId' } ]
+    get:
+      tags: [댓글]
+      operationId: listComments
+      summary: 댓글 목록 (작성순, 삭제된 댓글은 deleted=true와 빈 내용)
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-owner: 요청자는 본인 요청만, 승인 필요 요청은 요청자·배정 담당자·관리자만
+      x-screens: [detail.comments]
+      responses:
+        '200':
+          description: 댓글 목록
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Comment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [댓글]
+      operationId: createComment
+      summary: 댓글 작성
+      description: 취소·반려 건, 최종 완료 후 7일이 지난 완료 건에는 409(COMMENT_CLOSED).
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-owner: 요청자는 본인 요청만, 승인 필요 요청은 요청자·배정 담당자·관리자만
+      x-screens: [detail.comment.create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateComment' }
+      responses:
+        '201':
+          description: 작성됨
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/requests/{requestId}/comments/{commentId}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+      - name: commentId
+        in: path
+        required: true
+        schema: { type: integer, format: int64 }
+    delete:
+      tags: [댓글]
+      operationId: deleteComment
+      summary: 댓글 삭제 (작성자 본인만, 실제로는 deleted=true)
+      x-roles: [REQUESTER, ASSIGNEE, ADMIN]
+      x-owner: 작성자 본인만
+      x-screens: [detail.comment.delete]
+      responses:
+        '204': { description: 삭제됨 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/stats/processing-time:
+    get:
+      tags: [통계]
+      operationId: getProcessingTimeStats
+      summary: 유형별 평균 처리 시간 (기간 = 최종 완료 시각, 상태 COMPLETED만)
+      x-roles: [ADMIN]
+      x-screens: [stats.processingTime, stats.periodFilter]
+      parameters:
+        - $ref: '#/components/parameters/FromDate'
+        - $ref: '#/components/parameters/ToDate'
+      responses:
+        '200':
+          description: 유형별 평균
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProcessingTimeStat' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/stats/open-status:
+    get:
+      tags: [통계]
+      operationId: getOpenStatusStats
+      summary: 미처리·지연 현황 (현재 시점, 오늘은 서버 LocalDate.now())
+      x-roles: [ADMIN]
+      x-screens: [stats.overdueCount, stats.openStatus]
+      responses:
+        '200':
+          description: 상태별 건수와 지연 건수
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenStatusStat' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: JSESSIONID
+
+  parameters:
+    RequestId:
+      name: requestId
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    Tab:
+      name: tab
+      in: query
+      required: true
+      schema: { type: string, enum: [MY, ASSIGNED_TO_ME, PENDING_APPROVAL, RECEIVED, ALL] }
+    StatusFilter:
+      name: status
+      in: query
+      schema: { $ref: '#/components/schemas/RequestStatus' }
+    TypeIdFilter:
+      name: typeId
+      in: query
+      schema: { type: integer, format: int64 }
+    FromDate:
+      name: from
+      in: query
+      description: 시작일(포함)
+      schema: { type: string, format: date }
+    ToDate:
+      name: to
+      in: query
+      description: 종료일(포함)
+      schema: { type: string, format: date }
+    Keyword:
+      name: keyword
+      in: query
+      description: 제목 검색어
+      schema: { type: string, maxLength: 100 }
+
+  requestBodies:
+    VersionOnly:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/VersionBody' }
+    VersionWithText:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/VersionWithTextBody' }
+
+  responses:
+    DetailOk:
+      description: 변경 후 상세 (새 version 포함)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/RequestDetail' }
+    BadRequest:
+      description: 입력 오류(VALIDATION_FAILED, 항목별 errors) 또는 업무 규칙 위반(STATUS_FILTER_NOT_ALLOWED, INVALID_ASSIGNEE, TOO_MANY_ROWS 등)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: 로그인 필요 (UNAUTHORIZED)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: 권한 없음 (FORBIDDEN) 또는 CSRF 토큰 오류
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: 요청·댓글 없음 (NOT_FOUND)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: INVALID_STATUS_TRANSITION, VERSION_CONFLICT, COMMENT_CLOSED
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    Role:
+      type: string
+      enum: [REQUESTER, ASSIGNEE, ADMIN]
+    RequestStatus:
+      type: string
+      enum: [PENDING_APPROVAL, RECEIVED, ASSIGNED, IN_PROGRESS, ON_HOLD, COMPLETED, REJECTED, CANCELED]
+    EventType:
+      type: string
+      enum: [CREATED, UPDATED, APPROVED, REJECTED, ASSIGNED, STARTED, HELD, RESUMED, COMPLETED, REOPENED, CANCELED]
+    Action:
+      type: string
+      description: 상세 화면에 보여줄 버튼
+      enum: [EDIT, CANCEL, REOPEN, APPROVE, REJECT, ASSIGN, REASSIGN, START, HOLD, RESUME, COMPLETE]
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, examples: [VERSION_CONFLICT] }
+        message: { type: string, examples: [다른 사용자가 먼저 변경했습니다.] }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, reason]
+            properties:
+              field: { type: string, examples: [title] }
+              reason: { type: string, examples: [제목을 입력해 주세요.] }
+
+    LoginRequest:
+      type: object
+      required: [loginId, password]
+      properties:
+        loginId: { type: string, maxLength: 50 }
+        password: { type: string, maxLength: 100 }
+    Me:
+      type: object
+      required: [id, name, role, departmentName]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        departmentName: { type: string }
+
+    RequestType:
+      type: object
+      required: [id, code, name, approvalRequired]
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        approvalRequired: { type: boolean }
+    AssigneeOption:
+      type: object
+      required: [id, name, inProgressCount]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        inProgressCount: { type: integer }
+
+    CreateRequest:
+      type: object
+      required: [typeId, title, content, dueDate]
+      properties:
+        typeId: { type: integer, format: int64 }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        content: { type: string, minLength: 1, maxLength: 10000 }
+        dueDate: { type: string, format: date, description: 오늘 또는 그 이후 }
+    UpdateRequest:
+      type: object
+      required: [title, content, dueDate, version]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        content: { type: string, minLength: 1, maxLength: 10000 }
+        dueDate: { type: string, format: date }
+        version: { type: integer, format: int64 }
+    VersionBody:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer, format: int64 }
+    VersionWithTextBody:
+      type: object
+      required: [version, text]
+      properties:
+        version: { type: integer, format: int64 }
+        text: { type: string, minLength: 1, maxLength: 1000, description: 사유 또는 처리 결과 }
+    AssignRequest:
+      type: object
+      required: [version, assigneeId]
+      properties:
+        version: { type: integer, format: int64 }
+        assigneeId: { type: integer, format: int64 }
+
+    IdResponse:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer, format: int64 }
+    TabCounts:
+      type: object
+      required: [pendingApproval, received]
+      properties:
+        pendingApproval: { type: integer }
+        received: { type: integer }
+
+    RequestSummary:
+      type: object
+      required: [id, typeName, title, departmentName, status, overdue, createdAt, dueDate]
+      properties:
+        id: { type: integer, format: int64 }
+        typeName: { type: string }
+        title: { type: string }
+        departmentName: { type: string }
+        assigneeName: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+        overdue: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        dueDate: { type: string, format: date }
+    RequestPage:
+      type: object
+      required: [content, page, size, totalElements]
+      properties:
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/RequestSummary' }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer, format: int64 }
+
+    RequestDetail:
+      type: object
+      required: [id, type, approvalRequired, requester, departmentName, title, status, dueDate, createdAt, version, contentVisible, availableActions]
+      properties:
+        id: { type: integer, format: int64 }
+        type: { $ref: '#/components/schemas/RequestType' }
+        approvalRequired: { type: boolean, description: 등록 시점 값 }
+        requester:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: integer, format: int64 }
+            name: { type: string }
+            extension: { type: [string, 'null'], description: 내선번호 }
+        departmentName: { type: string, description: 등록 시점 부서 }
+        assignee:
+          type: [object, 'null']
+          properties:
+            id: { type: integer, format: int64 }
+            name: { type: string }
+        title: { type: string }
+        content: { type: [string, 'null'], description: contentVisible=false면 null }
+        result: { type: [string, 'null'], description: 가장 최근 COMPLETED 이력의 내용 }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+        overdue: { type: boolean }
+        dueDate: { type: string, format: date }
+        createdAt: { type: string, format: date-time }
+        lastCompletedAt: { type: [string, 'null'], format: date-time }
+        version: { type: integer, format: int64 }
+        contentVisible: { type: boolean }
+        commentAllowed: { type: boolean }
+        availableActions:
+          type: array
+          items: { $ref: '#/components/schemas/Action' }
+
+    HistoryItem:
+      type: object
+      required: [id, eventType, toStatus, actorName, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        eventType: { $ref: '#/components/schemas/EventType' }
+        fromStatus: { oneOf: [ { $ref: '#/components/schemas/RequestStatus' }, { type: 'null' } ] }
+        toStatus: { $ref: '#/components/schemas/RequestStatus' }
+        fromAssigneeName: { type: [string, 'null'] }
+        toAssigneeName: { type: [string, 'null'] }
+        content: { type: [string, 'null'], description: 사유·처리 결과·수정 항목명 }
+        actorName: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    CreateComment:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 2000 }
+    Comment:
+      type: object
+      required: [id, writerName, deleted, mine, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        writerName: { type: string }
+        content: { type: [string, 'null'], description: 삭제되면 null }
+        deleted: { type: boolean }
+        mine: { type: boolean, description: 삭제 버튼 노출 여부 }
+        createdAt: { type: string, format: date-time }
+
+    ProcessingTimeStat:
+      type: object
+      required: [typeCode, typeName, completedCount, avgMinutes]
+      properties:
+        typeCode: { type: string }
+        typeName: { type: string }
+        completedCount: { type: integer }
+        avgMinutes: { type: integer }
+    OpenStatusStat:
+      type: object
+      required: [byStatus, overdueCount]
+      properties:
+        byStatus:
+          type: object
+          description: 미완료 5개 상태별 건수
+          additionalProperties: { type: integer }
+        overdueCount: { type: integer }
+
+security:
+  - session: []
