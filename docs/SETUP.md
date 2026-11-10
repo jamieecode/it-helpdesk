@@ -4,14 +4,14 @@ VS Code + Claude Code 기준입니다. 한 번만 하면 됩니다.
 
 ## 1. 설치
 
-| 도구 | 버전 | 비고 |
-|---|---|---|
-| JDK | 21 (Eclipse Temurin 권장) | `java -version`으로 확인 |
-| Docker Desktop | 최신 | MySQL과 Testcontainers에 사용 |
-| VS Code | 최신 | 저장소를 열면 추천 확장 설치 안내가 뜹니다 (`.vscode/extensions.json`) |
-| Node.js | LTS | React 화면용 |
-| Python | 3.10 이상 | API 점검 도구용: `pip install -r tools/requirements.txt` |
-| Claude Code | 최신 | 저장소 루트에서 `claude` 실행 |
+| 도구           | 버전                      | 비고                                                                                                                                                                                                                                                                                                            |
+| -------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| JDK            | 21 (Eclipse Temurin 권장) | `JAVA_HOME`의 JDK로 확인: PowerShell `& "$env:JAVA_HOME\bin\java.exe" -version`, macOS/Linux `"$JAVA_HOME/bin/java" -version`. PATH에 다른 JDK가 먼저 있으면 `java -version`은 21이 아닐 수 있습니다. 백엔드 프로젝트를 만든 뒤에는 `backend` 폴더에서 `./gradlew -version`으로 Gradle이 쓰는 JVM도 확인합니다. |
+| Docker Desktop | 최신                      | MySQL과 Testcontainers에 사용                                                                                                                                                                                                                                                                                   |
+| VS Code        | 최신                      | 저장소를 열면 추천 확장 설치 안내가 뜹니다 (`.vscode/extensions.json`)                                                                                                                                                                                                                                          |
+| Node.js        | LTS                       | React 화면용                                                                                                                                                                                                                                                                                                    |
+| Python         | 3.10 이상                 | API 점검 도구용: `pip install -r tools/requirements.txt`                                                                                                                                                                                                                                                        |
+| Claude Code    | 최신                      | 저장소 루트에서 `claude` 실행                                                                                                                                                                                                                                                                                   |
 
 ## 2. MySQL 실행
 
@@ -25,15 +25,15 @@ docker compose ps             # STATUS가 healthy면 준비 완료
 
 VS Code 명령 팔레트(Cmd/Ctrl+Shift+P) → **Spring Initializr: Create a Gradle Project** 를 실행하고 아래처럼 고릅니다.
 
-| 항목 | 값 |
-|---|---|
-| Spring Boot | 4.1.x (목록의 최신 정식 버전) |
-| Language | Java |
-| Group Id | `com.jaewan` |
-| Artifact Id | `helpdesk` |
-| Packaging | Jar |
-| Java | 21 |
-| 위치 | 이 저장소 루트 → 만들어진 `helpdesk/` 폴더 이름을 `backend/`로 바꾸기 |
+| 항목        | 값                                                                    |
+| ----------- | --------------------------------------------------------------------- |
+| Spring Boot | 4.1.x (목록의 최신 정식 버전)                                         |
+| Language    | Java                                                                  |
+| Group Id    | `com.jaewan`                                                          |
+| Artifact Id | `helpdesk`                                                            |
+| Packaging   | Jar                                                                   |
+| Java        | 21                                                                    |
+| 위치        | 이 저장소 루트 → 만들어진 `helpdesk/` 폴더 이름을 `backend/`로 바꾸기 |
 
 의존성:
 
