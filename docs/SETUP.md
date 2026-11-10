@@ -40,7 +40,7 @@ VS Code 명령 팔레트(Cmd/Ctrl+Shift+P) → **Spring Initializr: Create a Gra
 - Spring Web
 - Spring Security
 - Spring Data JPA
-- MyBatis Framework
+- MyBatis Framework (Spring Boot 4.1.x에서는 목록에 없습니다. 프로젝트를 만든 뒤 `build.gradle`에 직접 추가: `implementation 'org.mybatis.spring.boot:mybatis-spring-boot-starter:4.1.0'`)
 - MySQL Driver
 - Flyway Migration
 - Validation
